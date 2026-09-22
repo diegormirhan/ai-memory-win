@@ -1,6 +1,5 @@
 //! Filesystem-mutation primitives shared by the `--apply` modes on
-//! `install-mcp`, `install-hooks`, `setup-agent`, and the new
-//! `install-instructions`.
+//! `install-mcp`, `install-hooks`, and `install-instructions`.
 //!
 //! Every write goes through [`apply_atomic`], which:
 //!

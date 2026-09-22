@@ -153,7 +153,6 @@ pub async fn run() -> Result<()> {
         Command::PendingWrites(args) => commands::pending_writes::run(&config, args).await,
         Command::Embed(args) => commands::embed::run(&config, args).await,
         Command::GenerateAuthToken(args) => commands::generate_auth_token::run(&config, args),
-        Command::SetupAgent(args) => commands::setup_agent::run(&config, args),
         Command::Bootstrap(args) => commands::bootstrap::run(&config, args).await,
         Command::InstallInstructions(args) => commands::install_instructions::run(&config, args),
         Command::InstallSkills(args) => commands::install_skills::run(&config, args),

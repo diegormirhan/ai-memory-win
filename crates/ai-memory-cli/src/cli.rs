@@ -149,11 +149,6 @@ pub enum Command {
     Embed(EmbedArgs),
     /// Generate a random hex bearer token for AI_MEMORY_AUTH_TOKEN.
     GenerateAuthToken(GenerateAuthTokenArgs),
-    /// One-shot agent setup for docker deploys: extract the bundled
-    /// hook scripts to a host-mounted directory AND print the matching
-    /// config snippet. Replaces the "clone the repo + cargo build"
-    /// workflow for users who never want a local Rust toolchain.
-    SetupAgent(SetupAgentArgs),
     /// Pre-load an existing project's history into the wiki by
     /// LLM-summarising git log, README, docs/, and module headers
     /// into seed wiki pages. Run once when adopting ai-memory in a
@@ -1317,42 +1312,6 @@ pub struct BootstrapArgs {
     pub resume: bool,
 }
 
-/// Arguments for `setup-agent`.
-#[derive(Debug, Args)]
-pub struct SetupAgentArgs {
-    /// Which agent's hook bundle to extract + render.
-    #[arg(long, value_enum, default_value_t = AgentChoice::ClaudeCode)]
-    pub agent: AgentChoice,
-    /// Filesystem directory the hook scripts get copied into. In a
-    /// docker context this is the in-container path; mount a host
-    /// directory there. Example:
-    ///     docker run --rm -v $HOME/.ai-memory:/host ai-memory \
-    ///       setup-agent --to /host/hooks ...
-    #[arg(long)]
-    pub to: PathBuf,
-    /// Directory the rendered config JSON should reference for the
-    /// hook commands. Defaults to `--to`. Set this when the path on
-    /// the host (where the agent CLI runs) differs from the in-
-    /// container path. Example:
-    ///     --to /host/hooks  --host-prefix $HOME/.ai-memory/hooks
-    #[arg(long)]
-    pub host_prefix: Option<PathBuf>,
-    /// MCP / hook ingress URL the agent should POST to. Defaults to the
-    /// configured `server_url` / AI_MEMORY_SERVER_URL when set, else loopback.
-    #[arg(long, default_value_t = crate::config::DEFAULT_SERVER_URL.to_string())]
-    pub server_url: String,
-    /// Bearer token embedded into each hook's env block. When omitted,
-    /// uses the token resolved by the config loader.
-    #[arg(long, hide_env_values = true)]
-    pub auth_token: Option<String>,
-    /// Source directory for the embedded hook bundle. Defaults to
-    /// `/usr/local/share/ai-memory/hooks` (the docker image's
-    /// bundled path) and falls back to a repo-local `hooks/` for
-    /// `cargo run setup-agent` during development.
-    #[arg(long)]
-    pub source: Option<PathBuf>,
-}
-
 /// Arguments for `generate-auth-token`.
 #[derive(Debug, Args)]
 pub struct GenerateAuthTokenArgs {
@@ -1764,7 +1723,7 @@ fn parse_finalizable_agent(s: &str) -> Result<ai_memory_core::AgentKind, String>
 #[derive(Debug, Args)]
 pub struct FinalizeSessionArgs {
     /// Agent kind to finalize. Accepts any agent the store recognises — unlike
-    /// `install-hooks`/`setup-agent`, which are limited to agents with a
+    /// `install-hooks`, which is limited to agents with a
     /// first-party installer. finalize-session is agent-agnostic (it just posts
     /// a synthetic session-end and summarises), so refusing a captured harness
     /// like `hermes` here only stranded its sessions unclosable (#623).

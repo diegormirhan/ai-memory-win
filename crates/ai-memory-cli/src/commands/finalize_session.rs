@@ -240,12 +240,9 @@ fn session_end_hook_url(
 }
 
 fn effective_cwd(config: &Config) -> Result<String> {
-    if let Some(host_cwd) = config.runtime_env.host_cwd()
-        && !host_cwd.trim().is_empty()
-    {
-        return Ok(host_cwd.to_string());
-    }
-    Ok(std::env::current_dir()
+    Ok(config
+        .runtime_env
+        .working_dir()
         .context("getting CWD for synthetic session-end")?
         .to_string_lossy()
         .into_owned())

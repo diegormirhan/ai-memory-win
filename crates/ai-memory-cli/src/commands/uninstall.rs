@@ -2,7 +2,8 @@
 //! install-mcp / install-instructions. Detects ai-memory's wiring in
 //! every supported agent's config and removes only that, never
 //! third-party entries. Optional `--purge-data` wipes wiki/db/raw via
-//! the reset path. Docker teardown is printed, never executed.
+//! the reset path. The optional Windows scheduled task is printed, never
+//! removed automatically.
 //!
 //! Design: docs/superpowers/specs/2026-05-24-uninstall-command-design.md
 
@@ -657,20 +658,19 @@ pub fn run(config: &Config, args: UninstallArgs) -> anyhow::Result<()> {
         }
     }
 
-    print_docker_hint(args.purge_data);
+    print_native_uninstall_hint(args.purge_data);
 
     Ok(())
 }
 
-/// Print the manual Docker teardown steps (never executed). When the
+/// Print the remaining native data cleanup guidance. When the
 /// data was purged locally, note that; otherwise remind how to wipe it.
-fn print_docker_hint(data_purged: bool) {
+fn print_native_uninstall_hint(data_purged: bool) {
     println!();
-    println!("Wiring removed. ai-memory's server + data live in its container/volume —");
-    println!("tear those down manually:");
-    println!("  docker compose -f docker/docker-compose.yml down -v");
-    println!("  docker volume rm ai-memory-data   # if you used the default volume");
-    println!("  rm -f bin/ai-memory               # the wrapper script, if installed");
+    println!("Wiring removed.");
+    println!("If you installed the optional Windows server task, remove it manually:");
+    println!("  Stop-ScheduledTask -TaskName ai-memory   # if you created the optional task");
+    println!("  Unregister-ScheduledTask -TaskName ai-memory -Confirm:$false");
     if !data_purged {
         println!();
         println!(

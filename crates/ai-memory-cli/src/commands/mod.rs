@@ -1,6 +1,6 @@
 //! Subcommand implementations.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 
 use crate::config::Config;
 
@@ -76,7 +76,6 @@ pub mod run;
 pub mod run_autowire;
 pub mod search;
 pub mod serve;
-pub mod setup_agent;
 pub mod show;
 pub mod status;
 pub mod uninstall;
@@ -151,7 +150,7 @@ pub(crate) fn resolve_scope(
         Some(explicit) => explicit.to_string(),
         None => match marker
             .as_ref()
-            .and_then(|(scope, _, _)| scope.workspace.clone())
+            .and_then(|(scope, _)| scope.workspace.clone())
         {
             Some(declared) => {
                 decided.push("workspace");
@@ -167,21 +166,19 @@ pub(crate) fn resolve_scope(
             // A marker's explicit `project` pins the name for its whole tree.
             // Otherwise derive exactly as the hook does: basename(cwd) by
             // default, or the main repository root for `repo-root`.
-            let declared = marker
-                .as_ref()
-                .and_then(|(scope, identity_cwd, lookup_cwd)| {
-                    scope.project.clone().or_else(|| {
-                        if scope.is_repo_root() {
-                            crate::marker::repo_root_project(lookup_cwd)
-                        } else {
-                            ai_memory_consolidate::derive_project_name(
-                                std::path::Path::new(identity_cwd),
-                                ai_memory_consolidate::ProjectNameStrategy::Basename,
-                            )
-                            .map(|(name, _)| name)
-                        }
-                    })
-                });
+            let declared = marker.as_ref().and_then(|(scope, cwd)| {
+                scope.project.clone().or_else(|| {
+                    if scope.is_repo_root() {
+                        crate::marker::repo_root_project(cwd)
+                    } else {
+                        ai_memory_consolidate::derive_project_name(
+                            std::path::Path::new(cwd),
+                            ai_memory_consolidate::ProjectNameStrategy::Basename,
+                        )
+                        .map(|(name, _)| name)
+                    }
+                })
+            });
             match declared {
                 Some(name) => {
                     decided.push("project");
@@ -192,7 +189,7 @@ pub(crate) fn resolve_scope(
         }
     };
 
-    if let Some((scope, _, _)) = marker.as_ref().filter(|_| !decided.is_empty()) {
+    if let Some((scope, _)) = marker.as_ref().filter(|_| !decided.is_empty()) {
         // Name only the halves the marker actually decided: an explicit flag
         // that was honoured must not read as if the file overrode it.
         eprintln!(
@@ -258,7 +255,7 @@ pub(crate) fn resolve_workspace(config: &Config, explicit_ws: Option<&str>) -> S
         return explicit.to_string();
     }
     match marker_scope(config) {
-        Some((scope, _, _)) => match scope.workspace {
+        Some((scope, _)) => match scope.workspace {
             Some(declared) => {
                 eprintln!(
                     "ai-memory: workspace {declared} (workspace from {})",
@@ -272,38 +269,12 @@ pub(crate) fn resolve_workspace(config: &Config, explicit_ws: Option<&str>) -> S
     }
 }
 
-/// The nearest scope-declaring marker plus the cwd the walk started from.
-fn marker_scope(config: &Config) -> Option<(crate::marker::MarkerScope, String, String)> {
-    let identity_cwd = scope_cwd(config)?;
-    // The Docker wrapper preserves the host cwd for identity but binds the
-    // checkout at /work. Check the host path when its bounded root is mounted;
-    // otherwise use the physical cwd so a marker in the /work bind is still
-    // visible. Project derivation keeps using the host identity either way.
-    let lookup_cwd = if let Some(scope_cwd) = config.runtime_env.scope_cwd() {
-        scope_cwd.to_string()
-    } else if std::path::Path::new(&identity_cwd).exists() {
-        identity_cwd.clone()
-    } else {
-        std::env::current_dir()
-            .ok()
-            .map(|cwd| cwd.to_string_lossy().into_owned())?
-    };
-    let scope = crate::marker::read_scope(&lookup_cwd, &config.runtime_env)?;
-    Some((scope, identity_cwd, lookup_cwd))
-}
-
-/// The directory marker discovery walks up from.
-///
-/// Prefers `AI_MEMORY_HOST_CWD` for the same reason [`resolve_project_name`]
-/// does: inside the docker wrapper the container's own `current_dir()` is the
-/// `/work` bind mount, which would find the wrong marker (or none).
-fn scope_cwd(config: &Config) -> Option<String> {
-    if let Some(host_cwd) = config.runtime_env.host_cwd() {
-        return Some(host_cwd.to_string());
-    }
-    std::env::current_dir()
-        .ok()
-        .map(|cwd| cwd.to_string_lossy().into_owned())
+/// The nearest scope-declaring marker and the local directory it was read from.
+fn marker_scope(config: &Config) -> Option<(crate::marker::MarkerScope, String)> {
+    let cwd = config.runtime_env.working_dir()?;
+    let cwd = cwd.to_string_lossy().into_owned();
+    let scope = crate::marker::read_scope(&cwd, &config.runtime_env)?;
+    Some((scope, cwd))
 }
 
 /// Resolve the effective project name for a client command.
@@ -314,17 +285,9 @@ fn scope_cwd(config: &Config) -> Option<String> {
 ///
 /// Precedence:
 /// 1. `explicit` (the user's `--project` flag) when non-empty.
-/// 2. `AI_MEMORY_HOST_CWD` env var. The docker wrapper sets this
-///    to the host's `$PWD` because inside the container the workdir
-///    is always `/work` (a bind mount), so the container's own
-///    `current_dir()` returns "work" for every invocation. Without
-///    this env var, every dockerised bootstrap would land in project
-///    `default/work` regardless of which host dir it was actually
-///    run from. Honoured here as a basename, same heuristic as the
-///    other fallbacks.
-/// 3. Basename of the git repo root walked up from CWD (handles
+/// 2. Basename of the git repo root walked up from CWD (handles
 ///    running from any subdir of the project).
-/// 4. Basename of the bare CWD (covers non-git directories).
+/// 3. Basename of the bare CWD (covers non-git directories).
 ///
 /// Mirrors the heuristic the hook router uses in
 /// `ai-memory-hooks::router::resolve_project_ids`, so commands
@@ -335,35 +298,10 @@ pub(crate) fn resolve_project_name(config: &Config, explicit: Option<&str>) -> R
     if let Some(p) = explicit.filter(|s| !s.is_empty()) {
         return Ok(p.to_string());
     }
-    if let Some(host_cwd) = config.runtime_env.host_cwd()
-        && let Some(name) = std::path::Path::new(host_cwd)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .filter(|s| !s.is_empty())
-    {
-        return Ok(name.to_string());
-    }
-
-    // Safety net: when running inside the docker wrapper, the
-    // container's workdir is bind-mounted at `/work` (a fresh path
-    // chosen specifically because the host's `$PWD` would conflict
-    // with the $HOME bind mount). If we fall through to here while
-    // `current_dir()` is `/work`, the wrapper is STALE: it didn't
-    // pass `-e AI_MEMORY_HOST_CWD=$PWD` and the binary has no idea
-    // which host dir invoked it. Bail with a clear remedy instead
-    // of silently writing every project to `default/work`.
-    let cwd = std::env::current_dir().context("getting CWD for project auto-detect")?;
-    if cwd.as_os_str() == "/work" {
-        bail!(
-            "the `ai-memory` wrapper at ~/.local/bin/ai-memory looks stale \
-             (it didn't pass AI_MEMORY_HOST_CWD into the container). Without \
-             this, every project would land in `default/work` regardless of \
-             which host dir you ran from. Reinstall the checksum-verified \
-             wrapper from the latest GitHub Release as documented in README.md,\n  \
-             (or run `ai-memory upgrade` if your existing wrapper is recent enough \
-             to know that command)"
-        );
-    }
+    let cwd = config
+        .runtime_env
+        .working_dir()
+        .context("getting CWD for project auto-detect")?;
 
     // Shared with the hook router via `derive_project_name` so the CLI
     // and hooks agree on what "the project for this cwd" means. The
@@ -415,7 +353,7 @@ mod tests {
     #[test]
     fn resolve_project_name_prefers_explicit_value() {
         let config = Config {
-            runtime_env: RuntimeEnv::with_host_cwd_for_tests("/host/ignored"),
+            runtime_env: RuntimeEnv::with_working_dir_for_tests("C:\\ignored"),
             ..Config::default()
         };
 
@@ -426,9 +364,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_project_name_uses_host_cwd_basename() {
+    fn resolve_project_name_uses_the_local_directory_basename() {
         let config = Config {
-            runtime_env: RuntimeEnv::with_host_cwd_for_tests("/host/my-project"),
+            runtime_env: RuntimeEnv::with_working_dir_for_tests("C:\\projects\\my-project"),
             ..Config::default()
         };
 
@@ -463,7 +401,7 @@ mod tests {
             std::fs::write(dir.join(".ai-memory.toml"), body).unwrap();
         }
         Config {
-            runtime_env: RuntimeEnv::with_host_cwd_for_tests(dir.to_str().unwrap()),
+            runtime_env: RuntimeEnv::with_working_dir_for_tests(dir),
             ..Config::default()
         }
     }
@@ -494,7 +432,7 @@ mod tests {
         let subdir = tmp.path().join("crates").join("cli");
         std::fs::create_dir_all(&subdir).unwrap();
         let config = Config {
-            runtime_env: RuntimeEnv::with_host_cwd_for_tests(subdir.to_str().unwrap()),
+            runtime_env: RuntimeEnv::with_working_dir_for_tests(&subdir),
             ..Config::default()
         };
 
@@ -565,7 +503,7 @@ mod tests {
         .unwrap();
         std::fs::write(worktree.join(".ai-memory.toml"), "workspace = \"acme\"\n").unwrap();
         let config = Config {
-            runtime_env: RuntimeEnv::with_host_cwd_for_tests(worktree.to_str().unwrap()),
+            runtime_env: RuntimeEnv::with_working_dir_for_tests(&worktree),
             ..Config::default()
         };
 

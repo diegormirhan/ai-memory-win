@@ -11430,7 +11430,7 @@ mod tests {
 
     #[test]
     fn grok_session_start_hook_does_not_fetch_handoff() {
-        let src = include_str!("../../../hooks/grok/session-start.sh");
+        let src = include_str!("../../../hooks/grok/session-start.ps1");
         assert!(
             src.contains("Do NOT fetch /handoff"),
             "Grok SessionStart must keep the capture-only refusal"

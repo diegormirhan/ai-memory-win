@@ -5976,10 +5976,7 @@ mod tests {
     }
     use crate::cli::ProjectStrategyArg;
     use crate::commands::render_shared::KIRO_CLI_V2_SESSION_START_MAX_OUTPUT;
-    use std::collections::BTreeMap;
     use std::fs;
-    #[cfg(any(unix, windows))]
-    use std::process::Command;
     use tempfile::TempDir;
 
     #[test]
@@ -6079,35 +6076,6 @@ mod tests {
             }
         });
         assert_eq!(baked_claude_prompt_capture(&unrelated.to_string()), None);
-    }
-
-    #[cfg(unix)]
-    fn bash_program_for_installer_test() -> Option<std::path::PathBuf> {
-        Some(std::path::PathBuf::from("bash"))
-    }
-
-    #[cfg(windows)]
-    fn bash_program_for_installer_test() -> Option<std::path::PathBuf> {
-        let mut candidates = Vec::new();
-        if let Some(root) = std::env::var_os("EXEPATH") {
-            let root = std::path::PathBuf::from(root);
-            candidates.push(root.join("bin").join("bash.exe"));
-            candidates.push(root.join("usr").join("bin").join("bash.exe"));
-        }
-        for env_key in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
-            if let Some(root) = std::env::var_os(env_key) {
-                let root = std::path::PathBuf::from(root).join("Git");
-                candidates.push(root.join("bin").join("bash.exe"));
-                candidates.push(root.join("usr").join("bin").join("bash.exe"));
-            }
-        }
-        candidates.sort();
-        candidates.dedup();
-        let found = candidates.into_iter().find(|candidate| candidate.is_file());
-        if found.is_none() {
-            eprintln!("skipping installer shell contract: Git for Windows bash.exe was not found");
-        }
-        found
     }
 
     #[test]
@@ -7543,7 +7511,7 @@ model = "gpt-5"
     }
 
     #[test]
-    fn bundled_posix_and_powershell_hooks_stay_in_parity() {
+    fn bundled_powershell_hooks_have_valid_metadata() {
         let hooks_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -7574,8 +7542,11 @@ model = "gpt-5"
         for agent_dir in agent_dirs {
             let agent_dir = agent_dir.as_str();
             let dir = hooks_root.join(agent_dir);
-            let mut sh = BTreeMap::new();
-            let mut ps1 = BTreeMap::new();
+            let expected_agent = match agent_dir {
+                "opencode" => "open-code",
+                _ => agent_dir,
+            };
+            let mut script_count = 0;
             for entry in fs::read_dir(&dir).unwrap_or_else(|e| {
                 panic!("failed to read bundled hook dir {}: {e}", dir.display())
             }) {
@@ -7583,58 +7554,25 @@ model = "gpt-5"
                 if !path.is_file() {
                     continue;
                 }
-                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                if path.extension().and_then(|extension| extension.to_str()) != Some("ps1") {
                     continue;
-                };
-                match path.extension().and_then(|s| s.to_str()) {
-                    Some("sh") => {
-                        sh.insert(stem.to_string(), extract_sh_hook_metadata(&path));
-                    }
-                    Some("ps1") => {
-                        ps1.insert(stem.to_string(), extract_ps1_hook_metadata(&path));
-                    }
-                    _ => {}
                 }
-            }
-            assert_eq!(
-                sh.keys().collect::<Vec<_>>(),
-                ps1.keys().collect::<Vec<_>>(),
-                "{agent_dir}: every .sh hook must have a .ps1 peer"
-            );
-            for (stem, sh_meta) in sh {
+                script_count += 1;
+                let (event, agent) = extract_ps1_hook_metadata(&path);
                 assert_eq!(
-                    Some(sh_meta),
-                    ps1.remove(&stem),
-                    "{agent_dir}/{stem}: .sh and .ps1 must post the same event/agent"
+                    agent,
+                    expected_agent,
+                    "{} must declare its bundle agent",
+                    path.display()
+                );
+                assert!(
+                    !event.is_empty(),
+                    "{} must declare an event",
+                    path.display()
                 );
             }
+            assert!(script_count > 0, "{agent_dir} has no PowerShell hooks");
         }
-    }
-
-    fn extract_sh_hook_metadata(path: &Path) -> (String, String) {
-        let text = fs::read_to_string(path).unwrap();
-        let marker = "hook?event=";
-        let start = text
-            .find(marker)
-            .unwrap_or_else(|| panic!("{} missing hook endpoint", path.display()))
-            + marker.len();
-        let rest = &text[start..];
-        let event = rest
-            .split('&')
-            .next()
-            .unwrap_or_else(|| panic!("{} missing event", path.display()))
-            .to_string();
-        let agent_marker = "&agent=";
-        let agent_start = rest
-            .find(agent_marker)
-            .unwrap_or_else(|| panic!("{} missing agent", path.display()))
-            + agent_marker.len();
-        let agent = rest[agent_start..]
-            .split(['"', '\'', ' ', '\n', '\r', '$'])
-            .next()
-            .unwrap_or_else(|| panic!("{} missing agent value", path.display()))
-            .to_string();
-        (event, agent)
     }
 
     #[test]
@@ -7671,16 +7609,8 @@ model = "gpt-5"
         let devin_dir = hooks_root.join("devin");
 
         assert!(
-            devin_dir.join("post-compaction.sh").is_file(),
-            "Devin bundle must have post-compaction.sh"
-        );
-        assert!(
             devin_dir.join("post-compaction.ps1").is_file(),
             "Devin bundle must have post-compaction.ps1"
-        );
-        assert!(
-            !devin_dir.join("pre-compact.sh").exists(),
-            "Devin bundle should not have pre-compact.sh"
         );
         assert!(
             !devin_dir.join("pre-compact.ps1").exists(),
@@ -9216,58 +9146,6 @@ model = "gpt-5"
             !extension.contains("pi.on(\"session_shutdown\", (_event: any, ctx: any) => {"),
             "session_shutdown must not regress to the sync fire-and-forget form: {extension}"
         );
-    }
-
-    // Windows 11 + Git Bash support matters for regulated enterprise setups
-    // where Git Bash is the approved shell available from the corporate
-    // repository, so this installer contract should be exercised anywhere
-    // Bash is the supported execution surface.
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn curl_installer_accepts_generated_integration_agents() {
-        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("scripts")
-            .join("install-hooks.sh");
-        let Some(bash) = bash_program_for_installer_test() else {
-            return;
-        };
-
-        for alias in ["opencode", "openclaw", "omp", "oh-my-pi", "pi"] {
-            let output = Command::new(&bash)
-                .arg(&script)
-                .arg("--agent")
-                .arg(alias)
-                .output()
-                .unwrap_or_else(|e| {
-                    panic!("failed to run {} for alias {alias}: {e}", script.display())
-                });
-
-            assert!(
-                output.status.success(),
-                "script rejected generated integration alias {alias}: stdout={}, stderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            match alias {
-                "opencode" => assert!(stdout.contains("install-hooks --agent opencode --apply")),
-                "openclaw" => assert!(stdout.contains("install-hooks --agent openclaw --apply")),
-                "omp" | "oh-my-pi" => {
-                    assert!(stdout.contains("install-hooks --agent omp --apply"));
-                    assert!(stdout.contains("~/.omp/agent/extensions/ai-memory.ts"));
-                }
-                "pi" => {
-                    assert!(stdout.contains("install-hooks --agent pi --apply"));
-                    assert!(stdout.contains("~/.pi/agent/extensions/ai-memory.ts"));
-                    assert!(stdout.contains("MCP tools come through the same generated bridge"));
-                    assert!(!stdout.contains("~/.omp/agent/extensions/ai-memory.ts"));
-                }
-                _ => unreachable!(),
-            }
-        }
     }
 
     // ----------------------------------------------------------------
@@ -10988,7 +10866,7 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
             .join("..")
             .join("..")
             .join("hooks");
-        let devin_session_start = hooks_root.join("devin").join("session-start.sh");
+        let devin_session_start = hooks_root.join("devin").join("session-start.ps1");
 
         // Normalized because this is the only assertion below that spans a
         // line break: on a Windows checkout with core.autocrlf=true the
@@ -10997,34 +10875,12 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
         let script_content = fs::read_to_string(&devin_session_start)
             .unwrap()
             .replace("\r\n", "\n");
-        // Verify the script injects handoff via hookSpecificOutput.additionalContext
+        // The shared native PowerShell hook handles the bounded handoff fetch.
         assert!(
-            script_content.contains("hookSpecificOutput"),
-            "Devin session-start.sh must inject handoff via hookSpecificOutput"
-        );
-        assert!(
-            script_content.contains("additionalContext"),
-            "Devin session-start.sh must use additionalContext field"
-        );
-        assert!(
-            script_content.contains("ai_memory_get_handoff"),
-            "Devin session-start.sh must fetch handoff"
-        );
-        assert!(
-            script_content.contains("$SERVER/handoff?agent=devin${QS}${SID_QS}"),
-            "Devin session-start.sh must bind the handoff claim to its generated session id"
-        );
-        assert!(
-            !script_content.contains("/handoff/latest"),
-            "Devin session-start.sh must not call the removed /handoff/latest route"
-        );
-        assert!(
-            script_content.contains("ai_memory_json_string"),
-            "Devin session-start.sh must JSON-escape handoff text before embedding it"
-        );
-        assert!(
-            script_content.contains("else\n    printf '{}\\n'\nfi"),
-            "Devin session-start.sh must print {{}} only when no handoff is available"
+            script_content.contains(
+                "Invoke-AiMemoryHook -Event \"session-start\" -Agent \"devin\" -FetchHandoff"
+            ),
+            "Devin session-start.ps1 must delegate handoff delivery to the native hook helper"
         );
     }
 
@@ -11035,16 +10891,12 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
             .join("..")
             .join("hooks");
         for agent in ["claude-code", "codex", "opencode", "cursor", "gemini-cli"] {
-            let script = fs::read_to_string(hooks_root.join(agent).join("session-start.sh"))
+            let script = fs::read_to_string(hooks_root.join(agent).join("session-start.ps1"))
                 .unwrap()
                 .replace("\r\n", "\n");
             assert!(
-                script.contains("SESSION_ID=$(ai_memory_extract_session_id \"$PAYLOAD\")"),
-                "{agent} must extract the native receiver session id"
-            );
-            assert!(
-                script.contains("${SESSION_QS}"),
-                "{agent} must forward the native receiver session id to /handoff"
+                script.contains("-FetchHandoff"),
+                "{agent} must request a handoff through the native PowerShell helper"
             );
         }
     }

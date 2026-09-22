@@ -133,7 +133,7 @@ fn a_tree_without_a_marker_is_unchanged() {
 }
 
 #[test]
-fn mounted_scope_cwd_reads_marker_while_host_cwd_keeps_project_identity() {
+fn legacy_cwd_environment_variables_do_not_override_the_native_directory() {
     let root = TempDir::new().expect("scope root");
     let data = TempDir::new().expect("data dir");
     std::fs::write(
@@ -144,14 +144,18 @@ fn mounted_scope_cwd_reads_marker_while_host_cwd_keeps_project_identity() {
     let mounted_cwd = root.path().join("crates/cli");
     std::fs::create_dir_all(&mounted_cwd).unwrap();
     let mounted_cwd = mounted_cwd.canonicalize().unwrap();
+    let ignored_scope = TempDir::new().expect("legacy scope directory");
     let root = real_path(&root);
     let data = real_path(&data);
     let stderr = search_stderr(
         &mounted_cwd,
         &data,
         &[
-            ("AI_MEMORY_HOST_CWD", "/host/repo/crates/cli"),
-            ("AI_MEMORY_SCOPE_CWD", mounted_cwd.to_str().unwrap()),
+            ("AI_MEMORY_HOST_CWD", r"C:\legacy\other-project"),
+            (
+                "AI_MEMORY_SCOPE_CWD",
+                ignored_scope.path().to_str().unwrap(),
+            ),
             ("HOME", root.to_str().unwrap()),
         ],
         &[],
@@ -159,6 +163,6 @@ fn mounted_scope_cwd_reads_marker_while_host_cwd_keeps_project_identity() {
 
     assert!(
         stderr.contains("scope acme/cli"),
-        "lookup must use the mounted path and naming must use host cwd: {stderr}"
+        "the process CWD must determine both marker lookup and project identity: {stderr}"
     );
 }

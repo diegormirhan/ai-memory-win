@@ -423,8 +423,8 @@ pub struct RuntimeEnv {
     codex_executable: Option<PathBuf>,
     server_url: Option<String>,
     auth_token: Option<String>,
-    host_cwd: Option<String>,
-    scope_cwd: Option<String>,
+    #[cfg(test)]
+    working_dir: Option<PathBuf>,
     ignore_marker: bool,
     project_strategy: Option<String>,
     claude_code_session_id: Option<String>,
@@ -453,8 +453,8 @@ impl RuntimeEnv {
             codex_executable: env_path("AI_MEMORY_CODEX_EXECUTABLE"),
             server_url: env_string("AI_MEMORY_SERVER_URL"),
             auth_token: env_string("AI_MEMORY_AUTH_TOKEN"),
-            host_cwd: env_string("AI_MEMORY_HOST_CWD"),
-            scope_cwd: env_string("AI_MEMORY_SCOPE_CWD"),
+            #[cfg(test)]
+            working_dir: None,
             // One-invocation escape hatch: run a command against the fallback
             // scope without editing (or leaving) the marker's tree.
             ignore_marker: env_string("AI_MEMORY_IGNORE_MARKER")
@@ -490,16 +490,14 @@ impl RuntimeEnv {
         }
     }
 
-    /// Host cwd forwarded by the docker wrapper, if present.
+    /// The process working directory used for local scope resolution.
     #[must_use]
-    pub fn host_cwd(&self) -> Option<&str> {
-        self.host_cwd.as_deref()
-    }
-
-    /// Container-visible cwd used only for marker discovery.
-    #[must_use]
-    pub fn scope_cwd(&self) -> Option<&str> {
-        self.scope_cwd.as_deref()
+    pub fn working_dir(&self) -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(working_dir) = &self.working_dir {
+            return Some(working_dir.clone());
+        }
+        std::env::current_dir().ok()
     }
 
     /// Operator home captured by the single config-read path.
@@ -528,9 +526,9 @@ impl RuntimeEnv {
     }
 
     #[cfg(test)]
-    pub fn with_host_cwd_for_tests(host_cwd: impl Into<String>) -> Self {
+    pub fn with_working_dir_for_tests(working_dir: impl Into<PathBuf>) -> Self {
         Self {
-            host_cwd: Some(host_cwd.into()),
+            working_dir: Some(working_dir.into()),
             ..Self::default()
         }
     }

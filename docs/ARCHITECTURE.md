@@ -477,11 +477,11 @@ install-mcp          commit               checkpoints
 restore-page         llm-test             forget-sweep
 lint                 curator              auto-improve-report
 auto-improve         finalize-session     pending-writes
-embed                generate-auth-token  setup-agent
-bootstrap            install-instructions install-skills
-reorg                purge-project        rename-project
-move-project         move-session         uninstall
-auth                 user                 completions
+embed                generate-auth-token  bootstrap
+install-instructions install-skills       reorg
+purge-project        rename-project       move-project
+move-session         uninstall            auth
+user                 completions
 handoffs             purge-session        compact
 api-key              export-okf           message
 doctor               backfill

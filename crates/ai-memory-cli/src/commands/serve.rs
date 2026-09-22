@@ -74,85 +74,23 @@ const SERVE_LOCK_FILE: &str = ".serve.lock";
 /// waiting for is abandoned. axum's graceful shutdown waits for every
 /// in-flight connection and a stateful or SSE MCP client can hold one open
 /// indefinitely, so an unbounded drain is indistinguishable from ignoring the
-/// signal: `docker stop` and `systemctl stop` would still burn their own
-/// grace period and finish with SIGKILL (#699). Each wait is bounded on its
-/// own, so a stop can take a small multiple of this.
+/// Ctrl-C request. Each wait is bounded on its own, so a stop can take a small
+/// multiple of this.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
-/// The signals that stop a running server, listened for on both transports.
+/// Windows console shutdown support for both server transports.
 ///
-/// Installed before the transport starts. The server runs as PID 1 under
-/// `docker run` (no init shim), and for PID 1 the kernel discards any signal
-/// whose handler is not installed — so a SIGTERM arriving during a slow boot
-/// (the pre-migration archive, wiki migrations) must already have a listener
-/// waiting for it. A tokio `Signal` queues a signal received before the first
-/// `recv`, so registering early loses nothing (#699).
-struct ShutdownSignals {
-    #[cfg(unix)]
-    interrupt: Option<tokio::signal::unix::Signal>,
-    #[cfg(unix)]
-    terminate: Option<tokio::signal::unix::Signal>,
-}
+/// Created before the transport starts so startup and shutdown use the same
+/// explicit lifecycle boundary.
+struct ShutdownSignals;
 
 impl ShutdownSignals {
-    /// Install the listeners.
-    ///
-    /// A listener that cannot be registered degrades to the remaining one with
-    /// a warning: losing one way to stop the server is bad, refusing to start
-    /// over it is worse.
-    #[cfg(unix)]
+    /// Create the shutdown receiver before slow startup begins.
     fn install() -> Self {
-        use tokio::signal::unix::{SignalKind, signal};
-
-        fn listen(kind: SignalKind, name: &str) -> Option<tokio::signal::unix::Signal> {
-            match signal(kind) {
-                Ok(stream) => Some(stream),
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        signal = name,
-                        "cannot listen for this shutdown signal; the server will not stop on it"
-                    );
-                    None
-                }
-            }
-        }
-
-        Self {
-            interrupt: listen(SignalKind::interrupt(), "SIGINT"),
-            terminate: listen(SignalKind::terminate(), "SIGTERM"),
-        }
+        Self
     }
 
-    /// Install the listeners. Non-unix has only ctrl-c.
-    #[cfg(not(unix))]
-    fn install() -> Self {
-        Self {}
-    }
-
-    /// Resolve with the name of the first shutdown signal to arrive.
-    #[cfg(unix)]
-    async fn recv(&mut self) -> &'static str {
-        match (self.interrupt.as_mut(), self.terminate.as_mut()) {
-            (Some(interrupt), Some(terminate)) => tokio::select! {
-                _ = interrupt.recv() => "SIGINT",
-                _ = terminate.recv() => "SIGTERM",
-            },
-            (Some(interrupt), None) => {
-                interrupt.recv().await;
-                "SIGINT"
-            }
-            (None, Some(terminate)) => {
-                terminate.recv().await;
-                "SIGTERM"
-            }
-            // Both registrations failed: there is nothing left to wait for.
-            (None, None) => std::future::pending().await,
-        }
-    }
-
-    /// Resolve with the name of the first shutdown signal to arrive.
-    #[cfg(not(unix))]
+    /// Wait for Ctrl-C, the interactive Windows shutdown request.
     async fn recv(&mut self) -> &'static str {
         if let Err(error) = tokio::signal::ctrl_c().await {
             tracing::warn!(%error, "ctrl-c listener failed; the server will not stop on it");
@@ -489,35 +427,10 @@ enum HttpExposure {
     /// Unauthenticated on a non-loopback address, allowed because the
     /// operator passed `--allow-insecure-no-auth`.
     InsecureByOverride,
-    /// Unauthenticated on a non-loopback address inside a container, where
-    /// the bind address is not evidence either way. See
-    /// [`validate_http_exposure`].
-    UndeterminedInContainer,
-}
-
-/// Detect that this process is running inside a container.
-///
-/// `/.dockerenv` is created by Docker, `/run/.containerenv` by Podman. The
-/// official image also sets `AI_MEMORY_IN_CONTAINER`, so the signal survives
-/// runtimes that create neither file.
-fn running_in_container() -> bool {
-    if std::env::var("AI_MEMORY_IN_CONTAINER").is_ok_and(|v| !v.trim().is_empty()) {
-        return true;
-    }
-    Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
 }
 
 /// Refuse accidental unauthenticated network exposure after the listener has
 /// selected its actual local address (which may differ from the bind input).
-///
-/// The check reads the bind address as evidence of reachability. That
-/// inference holds on a host, but **not** inside a container: publishing a
-/// port with `-p` requires binding `0.0.0.0` inside the namespace, and
-/// whether that port reaches the network is decided by the host-side publish
-/// spec — `-p 127.0.0.1:49374:49374` versus `-p 0.0.0.0:49374:49374` — which
-/// the process cannot observe. Refusing there is a false positive that took
-/// down the documented Quick Start container (#407), so containers get a
-/// loud warning instead.
 ///
 /// Note this is deliberately not backstopped by the `Host` allowlist: that
 /// allowlist defends against DNS rebinding, where a browser sets the header.
@@ -529,7 +442,6 @@ fn validate_http_exposure(
     human_mode: bool,
     secure_cookie: bool,
     allow_insecure_no_auth: bool,
-    containerized: bool,
 ) -> Result<HttpExposure> {
     if local_addr.ip().is_loopback() {
         return Ok(HttpExposure::Safe);
@@ -547,10 +459,6 @@ fn validate_http_exposure(
     if allow_insecure_no_auth {
         return Ok(HttpExposure::InsecureByOverride);
     }
-    if containerized {
-        return Ok(HttpExposure::UndeterminedInContainer);
-    }
-
     anyhow::bail!(
         "refusing unauthenticated plain HTTP on non-loopback address {local_addr}: anyone on the network could access ai-memory. Configure AI_MEMORY_AUTH_TOKEN or bind to a loopback address. For intentional LAN use, pass --allow-insecure-no-auth explicitly and review TLS options in docs/https-via-proxy.md."
     );
@@ -1388,7 +1296,6 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 human_mode,
                 config.auth.secure_cookie,
                 args.allow_insecure_no_auth,
-                running_in_container(),
             )?;
             info!(
                 %local_addr,
@@ -1402,16 +1309,6 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                     "starting unauthenticated plain HTTP on a non-loopback address because \
                      --allow-insecure-no-auth was supplied — anyone on the network can call \
                      destructive MCP tools"
-                );
-            } else if exposure == HttpExposure::UndeterminedInContainer {
-                tracing::warn!(
-                    %local_addr,
-                    "no AI_MEMORY_AUTH_TOKEN configured. Inside a container the bind address \
-                     cannot show whether this port reaches the network — that is decided by \
-                     the host publish spec. If you published it with `-p 127.0.0.1:49374:49374` \
-                     you are fine; if you published it on 0.0.0.0 or to a LAN address, anyone \
-                     on the network can call destructive MCP tools. Generate a token with \
-                     `ai-memory generate-auth-token` and set AI_MEMORY_AUTH_TOKEN"
                 );
             } else if auth_enabled && !local_addr.ip().is_loopback() {
                 // Auth IS configured but the server is reachable from
@@ -2531,7 +2428,6 @@ mod tests {
                             false,
                             false,
                             allow_override,
-                            false,
                         )
                         .is_ok(),
                         allowed,
@@ -2545,61 +2441,32 @@ mod tests {
     #[test]
     fn human_auth_non_loopback_requires_secure_cookie_posture() {
         let remote: SocketAddr = "192.168.1.90:49374".parse().unwrap();
-        assert!(validate_http_exposure(remote, true, true, false, false, false).is_err());
-        assert!(validate_http_exposure(remote, true, true, false, true, true).is_err());
+        assert!(validate_http_exposure(remote, true, true, false, false).is_err());
+        assert!(validate_http_exposure(remote, true, true, false, true).is_err());
         assert_eq!(
-            validate_http_exposure(remote, true, true, true, false, false).unwrap(),
+            validate_http_exposure(remote, true, true, true, false).unwrap(),
             HttpExposure::Safe
         );
 
         let loopback: SocketAddr = "127.0.0.1:49374".parse().unwrap();
         assert_eq!(
-            validate_http_exposure(loopback, true, true, false, false, false).unwrap(),
+            validate_http_exposure(loopback, true, true, false, false).unwrap(),
             HttpExposure::Safe
         );
     }
 
-    /// Regression for #407. The published image binds `0.0.0.0` because that
-    /// is the only way `-p` publishing works, so the host-side rule above
-    /// refused every container started from the documented Quick Start and
-    /// left it crash-looping under `--restart unless-stopped`.
     #[test]
-    fn containers_warn_instead_of_refusing_because_the_bind_proves_nothing() {
-        let quick_start: SocketAddr = "0.0.0.0:49374".parse().expect("valid test address");
+    fn native_server_refuses_unauthenticated_wildcard_bind() {
+        let wildcard: SocketAddr = "0.0.0.0:49374".parse().expect("valid test address");
 
-        // The exact Quick Start shape: no token, no override, in a container.
+        assert!(validate_http_exposure(wildcard, false, false, false, false).is_err());
         assert_eq!(
-            validate_http_exposure(quick_start, false, false, false, false, true)
-                .expect("must not refuse"),
-            HttpExposure::UndeterminedInContainer,
-        );
-
-        // Identical inputs on a host still refuse — the carve-out is scoped
-        // to the container case and does not soften the host rule.
-        assert!(validate_http_exposure(quick_start, false, false, false, false, false).is_err());
-
-        // A container is not a blanket downgrade: with machine auth configured
-        // the verdict is Safe, so the operator gets no spurious warning.
-        assert_eq!(
-            validate_http_exposure(quick_start, true, false, false, false, true)
-                .expect("auth is fine"),
+            validate_http_exposure(wildcard, true, false, false, false).expect("auth is fine"),
             HttpExposure::Safe,
         );
-
-        // An explicit override still reports as an override, not as the
-        // container case, so the startup log keeps naming the real reason.
         assert_eq!(
-            validate_http_exposure(quick_start, false, false, false, true, true)
-                .expect("override is fine"),
+            validate_http_exposure(wildcard, false, false, false, true).expect("override is fine"),
             HttpExposure::InsecureByOverride,
-        );
-
-        // Loopback inside a container is plain Safe.
-        let loopback: SocketAddr = "127.0.0.1:49374".parse().expect("valid test address");
-        assert_eq!(
-            validate_http_exposure(loopback, false, false, false, false, true)
-                .expect("loopback is fine"),
-            HttpExposure::Safe,
         );
     }
 
