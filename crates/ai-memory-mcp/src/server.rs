@@ -11432,12 +11432,12 @@ mod tests {
     fn grok_session_start_hook_does_not_fetch_handoff() {
         let src = include_str!("../../../hooks/grok/session-start.ps1");
         assert!(
-            src.contains("Do NOT fetch /handoff"),
-            "Grok SessionStart must keep the capture-only refusal"
+            src.contains("Invoke-AiMemoryHook -Event \"session-start\" -Agent \"grok\""),
+            "Grok SessionStart must invoke the native capture hook"
         );
         assert!(
-            !src.contains("/handoff?"),
-            "Grok SessionStart must not fetch the claiming /handoff endpoint"
+            !src.contains("-FetchHandoff"),
+            "Grok SessionStart must not request handoff injection"
         );
     }
 

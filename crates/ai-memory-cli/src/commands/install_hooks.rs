@@ -32,8 +32,8 @@ use crate::commands::render_shared::{
     build_devin_payload_with_data_dir, build_grok_payload_with_data_dir,
     build_kiro_cli_v2_hooks_value, build_kiro_cli_v3_hooks_value,
     build_pool_settings_yaml_with_data_dir, build_profile_payload_for_agent,
-    hook_script_for_claude_code, hook_script_for_current_platform, kimi_code_hook_commands,
-    local_hook_policy_v1_supported, ts_capture_policy_v1, ts_string_literal,
+    hook_script_for_current_platform, kimi_code_hook_commands, local_hook_policy_v1_supported,
+    ts_capture_policy_v1, ts_string_literal,
 };
 use crate::commands::uninstall::hook_command_is_ours;
 use crate::config::{Config, DEFAULT_SERVER_URL};
@@ -1668,7 +1668,7 @@ fn apply_to_claude_code_settings_in(
     let command_dir = staged_command_dir(&staged, "claude-code");
     let capture_prompts = install_claude_prompt_capture(args);
     let payload = configure_claude_prompt_capture(
-        crate::commands::render_shared::build_claude_code_script_payload_for_test(
+        crate::commands::render_shared::build_claude_code_command_payload_for_test(
             &command_dir,
             server_url,
             auth_token,
@@ -1927,7 +1927,7 @@ fn apply_to_command_code_settings_in(
 ) -> Result<()> {
     let staged = stage_hook_scripts_in(hooks_dir, "command-code", staging_data_local)?;
     let command_dir = staged_command_dir(&staged, "command-code");
-    let payload = crate::commands::render_shared::build_profile_script_payload_for_test(
+    let payload = crate::commands::render_shared::build_profile_command_payload_for_test(
         &COMMAND_CODE_PROFILE,
         &command_dir,
         server_url,
@@ -2045,7 +2045,7 @@ fn apply_to_codex_settings_in(
 ) -> Result<()> {
     let staged = stage_hook_scripts_in(hooks_dir, "codex", staging_data_local)?;
     let command_dir = staged_command_dir(&staged, "codex");
-    let payload = crate::commands::render_shared::build_profile_script_payload_for_test(
+    let payload = crate::commands::render_shared::build_profile_command_payload_for_test(
         &super::render_shared::CODEX_PROFILE,
         &command_dir,
         server_url,
@@ -4771,11 +4771,7 @@ fn manual_agent_project_strategy_instruction(project_strategy: Option<&str>) -> 
 /// Errors propagate when source is missing, the staging dir
 /// can't be created, or any file copy fails.
 fn stage_hook_scripts(source_dir: &Path, agent_label: &str, data_dir: &Path) -> Result<PathBuf> {
-    stage_hook_scripts_in(
-        source_dir,
-        agent_label,
-        &hook_staging_root(data_dir, ai_memory_wiki::backup::running_in_container()),
-    )
+    stage_hook_scripts_in(source_dir, agent_label, &hook_staging_root(data_dir))
 }
 
 /// Where hook scripts are staged — which is also the path written into
@@ -4791,14 +4787,8 @@ fn stage_hook_scripts(source_dir: &Path, agent_label: &str, data_dir: &Path) -> 
 ///   staged hooks from `~/.local/share/ai-memory/hooks` (its
 ///   `HOOKS_STAGE_DIR` contract), so the home-based default is the
 ///   host-reachable location there.
-pub(crate) fn hook_staging_root(data_dir: &Path, in_container: bool) -> PathBuf {
-    if in_container {
-        dirs::data_local_dir()
-            .map(|d| d.join("ai-memory"))
-            .unwrap_or_else(|| data_dir.to_path_buf())
-    } else {
-        data_dir.to_path_buf()
-    }
+pub(crate) fn hook_staging_root(data_dir: &Path) -> PathBuf {
+    data_dir.to_path_buf()
 }
 
 fn stage_hook_scripts_in(source_dir: &Path, agent_label: &str, data_dir: &Path) -> Result<PathBuf> {
@@ -4813,9 +4803,7 @@ fn stage_hook_scripts_in(source_dir: &Path, agent_label: &str, data_dir: &Path) 
         .with_context(|| format!("creating staging dir {}", dest_root.display()))?;
 
     // When `resolve_hooks_dir` falls through to the data-local
-    // candidate (e.g. docker `setup-agent` already extracted the
-    // bundle into ~/.local/share/ai-memory/hooks/<agent>/, or a prior
-    // install left scripts in place), the source dir IS the
+    // candidate from a prior install, the source dir IS the
     // destination dir. The wipe-then-copy flow below would delete the
     // very scripts we mean to install before reading them, leaving 0
     // copied and a settings.json pointing at an empty directory
@@ -4854,28 +4842,14 @@ fn stage_hook_scripts_in(source_dir: &Path, agent_label: &str, data_dir: &Path) 
 
     if !same_path {
         copy_support_hook_scripts(source_dir, &dest_root)?;
-
-        // Stage the shared `_lib.sh` helper alongside the event scripts so
-        // they can `. "$(dirname "$0")/_lib.sh"` without depending on the
-        // user's PATH or repo layout. The helper lives ONCE in
-        // `hooks/_lib.sh` (one parent up from the agent-specific dir) —
-        // staging it here is what keeps every agent's runtime view
-        // consistent with the source of truth.
-        if let Some(shared) = source_dir.parent().map(|p| p.join("_lib.sh"))
-            && shared.is_file()
-        {
-            copy_hook_file(&shared, &dest_root)?;
-        }
     }
 
     if count == 0 {
         anyhow::bail!(
             "no hook scripts found at {}.\n\
              Refusing to install — pointing the agent's settings at an empty \
-             directory would silently disable all capture. Either pass \
-             `--hooks-dir <path>` to point at a populated source tree, or run \
-             `ai-memory setup-agent --agent <name>` first to extract the \
-             bundled scripts.",
+             directory would silently disable all capture. Pass \
+             `--hooks-dir <path>` to point at a populated PowerShell bundle.",
             source_dir.display()
         );
     }
@@ -4897,21 +4871,11 @@ fn same_canonical_dir(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Copy a single hook file (event script or shared `_lib.sh`) into the
-/// staging dir, preserving the executable bit on Unix. Centralised so
-/// the script bulk-copy and the `_lib.sh` companion follow the same
-/// rules without duplicating permission-handling.
+/// Copy a single PowerShell hook into the staging directory.
 fn copy_hook_file(from: &Path, dest_root: &Path) -> Result<()> {
     let to = dest_root.join(from.file_name().context("bad source file name")?);
     fs::copy(from, &to)
         .with_context(|| format!("copying {} → {}", from.display(), to.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&to)?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&to, perms)?;
-    }
     Ok(())
 }
 
@@ -4947,18 +4911,12 @@ fn copy_support_hook_scripts(source_dir: &Path, dest_root: &Path) -> Result<()> 
     Ok(())
 }
 
-fn staged_command_dir(staged: &Path, agent_label: &str) -> PathBuf {
-    match std::env::var("AI_MEMORY_HOOKS_HOST_ROOT") {
-        Ok(root) if !root.trim().is_empty() => PathBuf::from(root).join(agent_label),
-        _ => staged.to_path_buf(),
-    }
+fn staged_command_dir(staged: &Path, _agent_label: &str) -> PathBuf {
+    staged.to_path_buf()
 }
 
 fn is_hook_script_file(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|s| s.to_str()),
-        Some("sh" | "ps1")
-    )
+    matches!(path.extension().and_then(|s| s.to_str()), Some("ps1"))
 }
 
 fn resolve_hooks_dir(
@@ -5001,7 +4959,7 @@ fn hook_source_candidates(
     exe_dir: Option<PathBuf>,
     data_dir: Option<PathBuf>,
 ) -> Vec<PathBuf> {
-    let mut candidates = Vec::with_capacity(5);
+    let mut candidates = Vec::with_capacity(3);
     // Cargo-run from the repo.
     if let Some(root) = repo_root {
         candidates.push(root.join("hooks").join(sub));
@@ -5012,14 +4970,7 @@ fn hook_source_candidates(
     if let Some(dir) = exe_dir {
         candidates.push(dir.join("hooks").join(sub));
     }
-    // Docker image lays them out under /usr/local/share/ai-memory/.
-    candidates.push(PathBuf::from(format!(
-        "/usr/local/share/ai-memory/hooks/{sub}"
-    )));
-    // Native Linux packages install hook sources under /usr/share.
-    candidates.push(PathBuf::from(format!("/usr/share/ai-memory/hooks/{sub}")));
-    // Local install honourable mention: the bundle a previous `--apply`, or
-    // docker `setup-agent`, staged under the data dir actually in use.
+    // A previous `--apply` may have staged the bundle under the active data dir.
     if let Some(dir) = data_dir {
         candidates.push(dir.join("hooks").join(sub));
     }
@@ -5061,8 +5012,7 @@ fn resolve_exe_path(exe: PathBuf) -> PathBuf {
     fs::canonicalize(&exe).unwrap_or(exe)
 }
 
-// CLAUDE_CODE_EVENTS + build_claude_code_payload now live in
-// `super::render_shared`, shared with `setup-agent`.
+// CLAUDE_CODE_EVENTS and its renderer live in `super::render_shared`.
 
 /// Which optional capture surfaces the generated Claude Code settings should
 /// include.
@@ -5094,21 +5044,19 @@ fn render_claude_code(
         prompts: capture_prompts,
     } = capture;
     // Soft check: warn (don't bail) if a script is missing. The user
-    // may be running this command inside docker against a host path
-    // that exists only on the host's filesystem — bailing would
-    // sabotage the docker-only flow `setup-agent` enables.
+    // may point at a bundle that has not yet been staged. Print mode remains
+    // non-destructive and reports the missing file to the operator.
     for (event, script) in super::render_shared::CLAUDE_CODE_EVENTS {
         if !capture_prompts && event == CLAUDE_PROMPT_EVENT {
             continue;
         }
-        let script = hook_script_for_claude_code(script);
+        let script = hook_script_for_current_platform(script);
         let abs = hooks_dir.join(script.as_ref());
         if !abs.exists() {
             eprintln!(
                 "# warning: {} not present on this filesystem. \
-                 If this command is running inside docker against a \
-                 host path, you can ignore this; otherwise extract \
-                 the scripts first with `ai-memory setup-agent`.",
+                 Re-run `ai-memory install-hooks --apply` to stage the \
+                 PowerShell hook bundle before applying this configuration.",
                 abs.display()
             );
         }
@@ -5154,14 +5102,13 @@ fn render_grok(
     // Soft check (same rationale as render_claude_code): warn, don't bail,
     // so the docker host-path flow still works.
     for (_, script) in super::render_shared::CLAUDE_CODE_EVENTS {
-        let script = hook_script_for_claude_code(script);
+        let script = hook_script_for_current_platform(script);
         let abs = hooks_dir.join(script.as_ref());
         if !abs.exists() {
             eprintln!(
                 "# warning: {} not present on this filesystem. \
-                 If this command is running inside docker against a \
-                 host path, you can ignore this; otherwise extract \
-                 the scripts first with `ai-memory setup-agent`.",
+                 Re-run `ai-memory install-hooks --apply` to stage the \
+                 PowerShell hook bundle before applying this configuration.",
                 abs.display()
             );
         }
@@ -5589,14 +5536,13 @@ fn render_devin(
     // Soft check (same rationale as render_claude_code): warn, don't bail,
     // so the docker host-path flow still works.
     for (_, script) in super::render_shared::DEVIN_EVENTS {
-        let script = hook_script_for_claude_code(script);
+        let script = hook_script_for_current_platform(script);
         let abs = hooks_dir.join(script.as_ref());
         if !abs.exists() {
             eprintln!(
                 "# warning: {} not present on this filesystem. \
-                 If this command is running inside docker against a \
-                 host path, you can ignore this; otherwise extract \
-                 the scripts first with `ai-memory setup-agent`.",
+                 Re-run `ai-memory install-hooks --apply` to stage the \
+                 PowerShell hook bundle before applying this configuration.",
                 abs.display()
             );
         }
@@ -5648,9 +5594,8 @@ fn render_kimi_code(
         if !abs.exists() {
             eprintln!(
                 "# warning: {} not present on this filesystem. \
-                 If this command is running inside docker against a \
-                 host path, you can ignore this; otherwise extract \
-                 the scripts first with `ai-memory setup-agent`.",
+                 Re-run `ai-memory install-hooks --apply` to stage the \
+                 PowerShell hook bundle before applying this configuration.",
                 abs.display()
             );
         }
@@ -5694,9 +5639,8 @@ fn render_kiro_cli(
         if !abs.exists() {
             eprintln!(
                 "# warning: {} not present on this filesystem. \
-                 If this command is running inside docker against a \
-                 host path, you can ignore this; otherwise extract \
-                 the scripts first with `ai-memory setup-agent`.",
+                 Re-run `ai-memory install-hooks --apply` to stage the \
+                 PowerShell hook bundle before applying this configuration.",
                 abs.display()
             );
         }
@@ -5741,9 +5685,8 @@ fn render_kiro_cli_v3(
         let abs = hooks_dir.join(hook_script_for_current_platform(script).as_ref());
         if !abs.exists() {
             eprintln!(
-                "# warning: {} not present on this filesystem. If this command is running \
-                 inside docker against a host path, you can ignore this; otherwise extract \
-                 the scripts first with `ai-memory setup-agent`.",
+                "# warning: {} not present on this filesystem. Re-run \
+                 `ai-memory install-hooks --apply` to stage the PowerShell bundle.",
                 abs.display()
             );
         }
@@ -5792,10 +5735,8 @@ fn render_pool(
         let abs = hooks_dir.join(script.as_ref());
         if !abs.exists() {
             eprintln!(
-                "# warning: {} not present on this filesystem. \
-                 If this command is running inside docker against a \
-                 host path, you can ignore this; otherwise extract \
-                 the scripts first with `ai-memory setup-agent`.",
+                "# warning: {} not present on this filesystem. Re-run \
+                 `ai-memory install-hooks --apply` to stage the PowerShell bundle.",
                 abs.display()
             );
         }
@@ -6306,15 +6247,10 @@ mod tests {
 
     fn stub_scripts(dir: &Path, names: &[&str]) {
         for name in names {
-            let p = dir.join(name);
-            fs::write(&p, "#!/bin/sh\n").unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(&p).unwrap().permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&p, perms).unwrap();
-            }
+            let name = name
+                .strip_suffix(".sh")
+                .map_or_else(|| (*name).to_string(), |stem| format!("{stem}.ps1"));
+            fs::write(dir.join(name), "# PowerShell hook\n").unwrap();
         }
     }
 
@@ -7644,7 +7580,7 @@ model = "gpt-5"
     }
 
     // ----------------------------------------------------------------
-    // Shared `_lib.sh` staging
+    // Windows-native hook staging
     // ----------------------------------------------------------------
 
     /// `stage_hook_scripts` copies the parent dir's `_lib.sh` alongside
@@ -7659,23 +7595,12 @@ model = "gpt-5"
     /// home-based path the wrapper bind-mounts and reads. Natively, the
     /// resolved data dir keeps winning (#554/#573).
     #[test]
-    fn staging_root_leaves_the_container_volume_for_home() {
+    fn staging_root_is_always_the_configured_data_dir() {
         let data = Path::new("/data");
         assert_eq!(
-            hook_staging_root(data, false),
+            hook_staging_root(data),
             PathBuf::from("/data"),
-            "native installs stage under the resolved data dir"
-        );
-        let in_container = hook_staging_root(data, true);
-        assert_ne!(
-            in_container,
-            PathBuf::from("/data"),
-            "container staging must not target the volume"
-        );
-        assert_eq!(
-            in_container,
-            dirs::data_local_dir().unwrap().join("ai-memory"),
-            "container staging targets the wrapper's bind-mounted home contract"
+            "Windows-native installs stage under the resolved data dir"
         );
     }
 
@@ -7690,22 +7615,13 @@ model = "gpt-5"
         let agent_src = bundle.join("stage-shared-lib");
         fs::create_dir_all(&agent_src).unwrap();
         fs::write(bundle.join("_lib.sh"), "# shared helper\n").unwrap();
-        stub_scripts(&agent_src, &["session-start.sh", "post-tool-use.sh"]);
+        stub_scripts(&agent_src, &["session-start.ps1", "post-tool-use.ps1"]);
 
         let data_dir = tmp.path().join("data");
         let staged = stage_hook_scripts_in(&agent_src, "stage-shared-lib", &data_dir).unwrap();
-        assert!(staged.join("session-start.sh").exists());
-        assert!(staged.join("post-tool-use.sh").exists());
-        assert!(
-            staged.join("_lib.sh").exists(),
-            "_lib.sh must be staged alongside event scripts",
-        );
-
-        let lib = fs::read_to_string(staged.join("_lib.sh")).unwrap();
-        assert!(
-            lib.contains("shared helper"),
-            "staged _lib.sh must match the source-of-truth"
-        );
+        assert!(staged.join("session-start.ps1").exists());
+        assert!(staged.join("post-tool-use.ps1").exists());
+        assert!(!staged.join("_lib.sh").exists());
     }
 
     /// Skipping `_lib.sh` is fine — older source bundles without the
@@ -7717,17 +7633,16 @@ model = "gpt-5"
         let agent_src = bundle.join("stage-no-lib");
         fs::create_dir_all(&agent_src).unwrap();
         // Note: no _lib.sh in `bundle`.
-        stub_scripts(&agent_src, &["session-start.sh"]);
+        stub_scripts(&agent_src, &["session-start.ps1"]);
 
         let data_dir = tmp.path().join("data");
         let staged = stage_hook_scripts_in(&agent_src, "stage-no-lib", &data_dir).unwrap();
-        assert!(staged.join("session-start.sh").exists());
+        assert!(staged.join("session-start.ps1").exists());
         assert!(!staged.join("_lib.sh").exists());
     }
 
     /// Regression for issue #52 — when `resolve_hooks_dir` picks the
-    /// data-local dir as the source bundle (the docker `setup-agent`
-    /// flow extracts scripts there) AND the staging destination is
+    /// data-local dir as the source bundle and the staging destination is
     /// the *same* dir, the pre-fix wipe-then-copy loop would delete
     /// every populated script and report `staged 0`. The same-path
     /// branch must verify in place without wiping, so existing scripts
@@ -7737,11 +7652,10 @@ model = "gpt-5"
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
         let agent_label = "stage-in-place";
-        // Simulate "scripts already extracted into the data dir's hooks
-        // dir by a prior `setup-agent` run".
+        // Simulate scripts already staged in the data dir by a prior install.
         let in_place = data_dir.join("hooks").join(agent_label);
         fs::create_dir_all(&in_place).unwrap();
-        stub_scripts(&in_place, &["session-start.sh", "post-tool-use.sh"]);
+        stub_scripts(&in_place, &["session-start.ps1", "post-tool-use.ps1"]);
 
         // Source == destination (this is what resolve_hooks_dir hands
         // us when no other candidate exists).
@@ -7749,11 +7663,11 @@ model = "gpt-5"
 
         assert_eq!(staged, in_place, "destination must canonicalize to source");
         assert!(
-            staged.join("session-start.sh").is_file(),
+            staged.join("session-start.ps1").is_file(),
             "in-place script must survive the same-path branch (not be wiped)"
         );
         assert!(
-            staged.join("post-tool-use.sh").is_file(),
+            staged.join("post-tool-use.ps1").is_file(),
             "in-place script must survive the same-path branch (not be wiped)"
         );
     }
@@ -7785,8 +7699,8 @@ model = "gpt-5"
             "error should call out the empty source: {msg}"
         );
         assert!(
-            msg.contains("--hooks-dir") || msg.contains("setup-agent"),
-            "error should point at the workaround (--hooks-dir or setup-agent): {msg}"
+            msg.contains("--hooks-dir"),
+            "error should point at the explicit bundle path: {msg}"
         );
     }
 
@@ -7818,12 +7732,12 @@ model = "gpt-5"
         let data_dir = tmp.path().join("custom-data");
         let source = tmp.path().join("bundle");
         fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("session-start.sh"), b"#!/bin/sh\n").unwrap();
+        fs::write(source.join("session-start.ps1"), b"# PowerShell hook\n").unwrap();
 
         // Staged into the configured dir…
         let staged = stage_hook_scripts_in(&source, "claude-code", &data_dir).unwrap();
         assert_eq!(staged, data_dir.join("hooks").join("claude-code"));
-        assert!(staged.join("session-start.sh").is_file());
+        assert!(staged.join("session-start.ps1").is_file());
         assert!(
             !tmp.path().join("ai-memory").exists(),
             "nothing may be written under a platform-default path"
@@ -7848,7 +7762,7 @@ model = "gpt-5"
         let default_data_dir = data_local.join("ai-memory");
         let source = tmp.path().join("bundle");
         fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("session-start.sh"), b"#!/bin/sh\n").unwrap();
+        fs::write(source.join("session-start.ps1"), b"# PowerShell hook\n").unwrap();
 
         let staged = stage_hook_scripts_in(&source, "claude-code", &default_data_dir).unwrap();
         assert_eq!(
@@ -8046,7 +7960,7 @@ model = "gpt-5"
     }
 
     #[test]
-    fn hook_source_candidates_include_native_package_dir() {
+    fn hook_source_candidates_use_repo_binary_and_data_dir() {
         let candidates = hook_source_candidates(
             "claude-code",
             Some(PathBuf::from("/repo")),
@@ -8062,14 +7976,6 @@ model = "gpt-5"
         );
         assert_eq!(
             candidates[2],
-            PathBuf::from("/usr/local/share/ai-memory/hooks/claude-code")
-        );
-        assert_eq!(
-            candidates[3],
-            PathBuf::from("/usr/share/ai-memory/hooks/claude-code")
-        );
-        assert_eq!(
-            candidates[4],
             PathBuf::from("/home/alice/.local/share/ai-memory/hooks/claude-code")
         );
     }
@@ -9540,7 +9446,7 @@ model = "gpt-5"
             .path()
             .join("hooks")
             .join("codex")
-            .join("session-start.sh");
+            .join("session-start.ps1");
         assert!(
             staged_script.is_file(),
             "expected hook script staged at {}, override was not honoured",
@@ -9554,9 +9460,8 @@ model = "gpt-5"
             .and_then(serde_json::Value::as_str)
             .expect("SessionStart command should be present");
         assert!(
-            command.contains(&staged_script.to_string_lossy().into_owned()),
-            "generated command must reference staged script {}: {command}",
-            staged_script.display()
+            command.contains("hook --event session-start --agent codex"),
+            "the Codex command must invoke the native hook: {command}"
         );
     }
 
@@ -10034,7 +9939,7 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
             .path()
             .join("hooks")
             .join("claude-code")
-            .join("session-start.sh");
+            .join("session-start.ps1");
         assert!(
             staged_script.is_file(),
             "expected hook script staged at {}, override was not honoured",
@@ -10043,14 +9948,14 @@ command = "AI_MEMORY_HOOK_URL=http://old:1 /old/ai-memory/hooks/kimi-code/sessio
 
         let parsed: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-        let command = parsed
-            .pointer("/hooks/SessionStart/0/hooks/0/command")
-            .and_then(serde_json::Value::as_str)
-            .expect("SessionStart command should be present");
+        let args = parsed
+            .pointer("/hooks/SessionStart/0/hooks/0/args")
+            .and_then(serde_json::Value::as_array)
+            .expect("Claude Code SessionStart must use exec-form arguments");
         assert!(
-            command.contains(&staged_script.to_string_lossy().into_owned()),
-            "generated command must reference staged script {}: {command}",
-            staged_script.display()
+            args.windows(2)
+                .any(|pair| pair[0] == "--event" && pair[1] == "session-start"),
+            "Claude Code must invoke the native session-start hook: {args:?}"
         );
     }
 

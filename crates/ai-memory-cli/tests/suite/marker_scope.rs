@@ -136,13 +136,13 @@ fn a_tree_without_a_marker_is_unchanged() {
 fn legacy_cwd_environment_variables_do_not_override_the_native_directory() {
     let root = TempDir::new().expect("scope root");
     let data = TempDir::new().expect("data dir");
+    let mounted_cwd = root.path().join("crates/cli");
+    std::fs::create_dir_all(&mounted_cwd).unwrap();
     std::fs::write(
-        root.path().join(".ai-memory.toml"),
+        mounted_cwd.join(".ai-memory.toml"),
         "workspace = \"acme\"\n",
     )
     .unwrap();
-    let mounted_cwd = root.path().join("crates/cli");
-    std::fs::create_dir_all(&mounted_cwd).unwrap();
     let mounted_cwd = mounted_cwd.canonicalize().unwrap();
     let ignored_scope = TempDir::new().expect("legacy scope directory");
     let root = real_path(&root);

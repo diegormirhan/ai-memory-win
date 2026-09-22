@@ -48,21 +48,13 @@ MCP configuration points the agent at the loopback server, normally
 `http://127.0.0.1:49374`. Do not expose that listener to a network unless
 authentication and TLS termination have been deliberately configured.
 
-## Migration work remaining
+## Migration status
 
-The removed packaging files were only the outer distribution layer. To make
-the codebase Windows-only, perform the remaining work in this order:
-
-1. replace Docker/container scope fallbacks with native current-directory and
-   explicit scope resolution;
-2. remove Unix shell hook rendering and retain native hook command rendering;
-3. remove container detection and Docker-specific uninstall, upgrade, and
-   setup-agent branches;
-4. replace Unix signal handling with Windows Ctrl-C and Task Scheduler process
-   lifecycle behavior;
-5. restrict CI and release packaging to `x86_64-pc-windows-msvc`; and
-6. add installer tests using a temporary data root and mocked Task Scheduler
-   calls before enabling it on a real profile.
+The native scope resolver, Windows Ctrl-C shutdown path, container-free server
+validation, and PowerShell-only hook staging are now in place. The remaining
+work is limited to exercising the installer and Task Scheduler lifecycle on a
+real Windows profile, then restricting release automation to
+`x86_64-pc-windows-msvc`.
 
 Keep the typed scope resolver, sanitizer, single SQLite writer, atomic wiki
 writes, and Git checkpointing unchanged: those are platform-neutral safety
